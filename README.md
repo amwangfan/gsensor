@@ -1,5 +1,7 @@
 # G 航迹（GFlight）
 
+[![Android APK](https://github.com/amwangfan/gsensor/actions/workflows/android.yml/badge.svg)](https://github.com/amwangfan/gsensor/actions/workflows/android.yml)
+
 面向民航旅行的 Android 加速度记录器。应用由用户主动启动，以前台服务和常驻通知在后台持续记录，输出 CSV 到系统共享目录 `Download/g/`。
 
 > 当前是可安装测试版工程（v0.1.0），不是经校准的航空仪表，也不能用于飞行安全判断。
