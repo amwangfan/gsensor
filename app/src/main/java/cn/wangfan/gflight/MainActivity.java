@@ -140,7 +140,7 @@ public final class MainActivity extends Activity {
         recordButton.setAllCaps(false);
         recordButton.setOnClickListener(v -> toggleRecording());
         currentCard.addView(recordButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
-        TextView note = text("文件保存至 Download/g。稳定 8 秒后降低写入频率，检测到变化时自动提升至最高 10 条/秒。", 12, 0xFF5A6763, false);
+        TextView note = text("文件保存至 Download/g。在约 ±0.06 g 容差内稳定 8 秒后降低写入频率；偶发扰动会保留，持续变化才切换高精度。", 12, 0xFF5A6763, false);
         currentCard.addView(note, margins(matchWrap(), 0, 10, 0, 0));
 
         LinearLayout savedCard = card();

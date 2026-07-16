@@ -15,7 +15,9 @@ public final class PureLogicCheck {
 
         AdaptiveSampler motion = new AdaptiveSampler();
         motion.onSample(0, 1.0);
-        AdaptiveSampler.Decision active = motion.onSample(S, 1.08);
+        motion.onSample(S, 1.08);
+        motion.onSample(S + 100_000_000L, 1.08);
+        AdaptiveSampler.Decision active = motion.onSample(S + 200_000_000L, 1.08);
         check(active.mode == AdaptiveSampler.Mode.ACTIVE, "motion activates high precision");
         check(AdaptiveSampler.samplingPeriodUs(active.mode) == 20_000, "active sampling rate");
 
