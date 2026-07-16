@@ -19,6 +19,10 @@ public final class AdaptiveSampler {
     private static final long SECOND_NS = 1_000_000_000L;
     private static final long QUIET_TO_STABLE_NS = 8 * SECOND_NS;
     private static final long ACTIVE_HOLD_NS = 10 * SECOND_NS;
+    // Normal sensor noise and light cabin vibration remain inside this band.
+    private static final double QUIET_TOLERANCE_G = 0.060;
+    private static final double IMMEDIATE_CHANGE_G = 0.150;
+    private static final int CHANGE_CONFIRM_SAMPLES = 3;
 
     private Mode mode = Mode.NORMAL;
     private double emaG = Double.NaN;
@@ -26,6 +30,7 @@ public final class AdaptiveSampler {
     private long quietSinceNs;
     private long activeUntilNs;
     private long lastLogNs = Long.MIN_VALUE;
+    private int consecutiveOutsideTolerance;
 
     public synchronized Decision onSample(long timestampNs, double magnitudeG) {
         if (!Double.isFinite(emaG)) {
@@ -36,12 +41,16 @@ public final class AdaptiveSampler {
             return new Decision(mode, false, true);
         }
 
-        double jerkG = Math.abs(magnitudeG - lastG);
         double deviationG = Math.abs(magnitudeG - emaG);
-        boolean significant = jerkG >= 0.025 || deviationG >= 0.040;
+        boolean outsideTolerance = deviationG >= QUIET_TOLERANCE_G;
+        if (outsideTolerance) consecutiveOutsideTolerance++;
+        else consecutiveOutsideTolerance = 0;
+        boolean significant = deviationG >= IMMEDIATE_CHANGE_G
+                || consecutiveOutsideTolerance >= CHANGE_CONFIRM_SAMPLES;
         Mode oldMode = mode;
 
         if (significant) {
+            consecutiveOutsideTolerance = 0;
             activeUntilNs = timestampNs + ACTIVE_HOLD_NS;
             quietSinceNs = timestampNs;
             mode = Mode.ACTIVE;
@@ -62,7 +71,9 @@ public final class AdaptiveSampler {
             case NORMAL -> SECOND_NS;         // normal write rate: 1 Hz
             case STABLE -> 5 * SECOND_NS;     // quiet heartbeat: once / 5 s
         };
-        boolean log = lastLogNs == Long.MIN_VALUE || timestampNs - lastLogNs >= interval;
+        // Keep isolated bumps in the CSV without treating them as sustained motion.
+        boolean log = outsideTolerance || lastLogNs == Long.MIN_VALUE
+                || timestampNs - lastLogNs >= interval;
         if (log) lastLogNs = timestampNs;
         return new Decision(mode, oldMode != mode, log);
     }

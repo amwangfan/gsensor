@@ -37,9 +37,19 @@ public final class RecordingService extends Service implements SensorEventListen
     public static final String EXTRA_RELIABLE = "reliable";
     public static final String EXTRA_TOTAL_G = "total_g";
     public static final String EXTRA_VERTICAL_G = "vertical_g";
+    public static final String EXTRA_DEVICE_X = "device_x";
+    public static final String EXTRA_DEVICE_Y = "device_y";
+    public static final String EXTRA_DEVICE_Z = "device_z";
     public static final String EXTRA_EAST = "east";
     public static final String EXTRA_NORTH = "north";
     public static final String EXTRA_UP = "up";
+    public static final String EXTRA_PRESSURE_HPA = "pressure_hpa";
+    public static final String EXTRA_BARO_ALTITUDE = "baro_altitude";
+    public static final String EXTRA_LATITUDE = "latitude";
+    public static final String EXTRA_LONGITUDE = "longitude";
+    public static final String EXTRA_GPS_ALTITUDE = "gps_altitude";
+    public static final String EXTRA_GPS_SPEED = "gps_speed";
+    public static final String EXTRA_GPS_ACCURACY = "gps_accuracy";
     public static final String EXTRA_MODE = "mode";
     public static final String EXTRA_ROWS = "rows";
     public static final String EXTRA_ERROR = "error";
@@ -182,8 +192,6 @@ public final class RecordingService extends Service implements SensorEventListen
         if (decision.modeChanged && decision.mode != registeredMode) {
             sensorHandler.post(() -> registerMotionSensors(decision.mode));
         }
-        if (!decision.shouldLog || store == null) return;
-
         if (firstSensorTimestampNs == 0) {
             firstSensorTimestampNs = event.timestamp;
             firstEpochMs = System.currentTimeMillis();
@@ -214,12 +222,14 @@ public final class RecordingService extends Service implements SensorEventListen
         r.gpsAccelMps2 = gpsAccelMps2;
         r.sensorAccuracy = sensorAccuracy;
         r.mode = decision.mode;
-        try {
-            store.write(r);
-        } catch (IOException e) {
-            broadcastError("写入失败：" + safeMessage(e));
-            new Handler(Looper.getMainLooper()).post(this::stopSelf);
-            return;
+        if (decision.shouldLog && store != null) {
+            try {
+                store.write(r);
+            } catch (IOException e) {
+                broadcastError("写入失败：" + safeMessage(e));
+                new Handler(Looper.getMainLooper()).post(this::stopSelf);
+                return;
+            }
         }
         publishProgress(r);
     }
@@ -231,9 +241,19 @@ public final class RecordingService extends Service implements SensorEventListen
             Intent update = new Intent(ACTION_UPDATE).setPackage(getPackageName());
             update.putExtra(EXTRA_TOTAL_G, r.totalG);
             update.putExtra(EXTRA_VERTICAL_G, r.verticalG);
+            update.putExtra(EXTRA_DEVICE_X, r.deviceX);
+            update.putExtra(EXTRA_DEVICE_Y, r.deviceY);
+            update.putExtra(EXTRA_DEVICE_Z, r.deviceZ);
             update.putExtra(EXTRA_EAST, r.east);
             update.putExtra(EXTRA_NORTH, r.north);
             update.putExtra(EXTRA_UP, r.up);
+            update.putExtra(EXTRA_PRESSURE_HPA, r.pressureHpa);
+            update.putExtra(EXTRA_BARO_ALTITUDE, r.baroRelativeAltM);
+            update.putExtra(EXTRA_LATITUDE, r.latitude);
+            update.putExtra(EXTRA_LONGITUDE, r.longitude);
+            update.putExtra(EXTRA_GPS_ALTITUDE, r.gpsAltitudeM);
+            update.putExtra(EXTRA_GPS_SPEED, r.gpsSpeedMps);
+            update.putExtra(EXTRA_GPS_ACCURACY, r.gpsAccuracyM);
             update.putExtra(EXTRA_MODE, r.mode.name());
             update.putExtra(EXTRA_ROWS, store == null ? 0 : store.getRows());
             sendBroadcast(update);
