@@ -1,6 +1,7 @@
 package cn.wangfan.gflight;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -71,6 +72,7 @@ public final class MainActivity extends Activity {
         buildUi();
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override protected void onStart() {
         super.onStart();
         IntentFilter filter = new IntentFilter(RecordingService.ACTION_UPDATE);
