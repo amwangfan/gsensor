@@ -11,9 +11,18 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -30,13 +39,17 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-public final class MainActivity extends Activity {
+public final class MainActivity extends Activity implements SensorEventListener, LocationListener {
     private static final int REQUEST_PERMISSIONS = 40;
+    private static final int REQUEST_PREVIEW_LOCATION = 42;
     private static final int OPEN_CSV = 41;
 
     private TextView statusText;
     private TextView totalGText;
     private TextView verticalGText;
+    private TextView deviceAccelText;
+    private TextView pressureText;
+    private TextView gpsText;
     private TextView rowText;
     private TextView coordinateText;
     private Button recordButton;
@@ -45,30 +58,58 @@ public final class MainActivity extends Activity {
     private LinearLayout fileList;
     private FlightVectorView vectorView;
     private boolean pendingStart;
+    private SensorManager previewSensorManager;
+    private LocationManager previewLocationManager;
+    private Sensor previewAccelerometer;
+    private Sensor previewRotationSensor;
+    private Sensor previewPressureSensor;
+    private final float[] previewRotationMatrix = new float[9];
+    private boolean hasPreviewRotation;
+    private float previewBaselinePressure = Float.NaN;
+    private boolean previewLocationActive;
+    private long lastPreviewAccelerationUiMs;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             String error = intent.getStringExtra(RecordingService.EXTRA_ERROR);
             if (error != null) Toast.makeText(MainActivity.this, error, Toast.LENGTH_LONG).show();
             String mode = intent.getStringExtra(RecordingService.EXTRA_MODE);
+            if (error != null && mode == null) return;
             if ("STOPPED".equals(mode)) {
                 renderStopped();
+                startPreview();
                 refreshFiles();
                 return;
             }
+            stopPreview();
             float total = intent.getFloatExtra(RecordingService.EXTRA_TOTAL_G, Float.NaN);
             float vertical = intent.getFloatExtra(RecordingService.EXTRA_VERTICAL_G, Float.NaN);
+            float deviceX = intent.getFloatExtra(RecordingService.EXTRA_DEVICE_X, Float.NaN);
+            float deviceY = intent.getFloatExtra(RecordingService.EXTRA_DEVICE_Y, Float.NaN);
+            float deviceZ = intent.getFloatExtra(RecordingService.EXTRA_DEVICE_Z, Float.NaN);
             float east = intent.getFloatExtra(RecordingService.EXTRA_EAST, Float.NaN);
             float north = intent.getFloatExtra(RecordingService.EXTRA_NORTH, Float.NaN);
             float up = intent.getFloatExtra(RecordingService.EXTRA_UP, Float.NaN);
+            float pressure = intent.getFloatExtra(RecordingService.EXTRA_PRESSURE_HPA, Float.NaN);
+            float baroAltitude = intent.getFloatExtra(RecordingService.EXTRA_BARO_ALTITUDE, Float.NaN);
+            double latitude = intent.getDoubleExtra(RecordingService.EXTRA_LATITUDE, Double.NaN);
+            double longitude = intent.getDoubleExtra(RecordingService.EXTRA_LONGITUDE, Double.NaN);
+            double gpsAltitude = intent.getDoubleExtra(RecordingService.EXTRA_GPS_ALTITUDE, Double.NaN);
+            float gpsSpeed = intent.getFloatExtra(RecordingService.EXTRA_GPS_SPEED, Float.NaN);
+            float gpsAccuracy = intent.getFloatExtra(RecordingService.EXTRA_GPS_ACCURACY, Float.NaN);
             int rows = intent.getIntExtra(RecordingService.EXTRA_ROWS, 0);
-            renderRecording(mode, total, vertical, east, north, up, rows);
+            renderRecording(mode, rows);
+            renderAcceleration(total, vertical, deviceX, deviceY, deviceZ, east, north, up);
+            renderPressure(pressure, baroAltitude);
+            renderLocation(latitude, longitude, gpsAltitude, gpsSpeed, gpsAccuracy);
         }
     };
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         if (!RecordingService.isRunning()) CsvStore.recoverPendingRecords(this);
+        previewSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        previewLocationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
         buildUi();
     }
 
@@ -78,13 +119,16 @@ public final class MainActivity extends Activity {
         IntentFilter filter = new IntentFilter(RecordingService.ACTION_UPDATE);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED);
         else registerReceiver(receiver, filter);
-        if (RecordingService.isRunning()) renderRecording("NORMAL", Float.NaN, Float.NaN,
-                Float.NaN, Float.NaN, Float.NaN, 0);
-        else renderStopped();
+        if (RecordingService.isRunning()) renderRecording("NORMAL", 0);
+        else {
+            renderStopped();
+            startPreview();
+        }
         refreshFiles();
     }
 
     @Override protected void onStop() {
+        stopPreview();
         unregisterReceiver(receiver);
         super.onStop();
     }
@@ -116,9 +160,17 @@ public final class MainActivity extends Activity {
         values.addView(verticalGText, new LinearLayout.LayoutParams(0, dp(78), 1));
         currentCard.addView(values, matchWrap());
 
+        deviceAccelText = text("设备轴加速度：等待传感器", 13, 0xFF33423E, false);
+        currentCard.addView(deviceAccelText, margins(matchWrap(), 0, 6, 0, 4));
+        pressureText = text("气压：等待传感器", 13, 0xFF33423E, false);
+        currentCard.addView(pressureText, margins(matchWrap(), 0, 4, 0, 4));
+        gpsText = text("GPS：正在检查权限和卫星信号…", 13, 0xFF33423E, false);
+        gpsText.setLineSpacing(dp(2), 1f);
+        currentCard.addView(gpsText, margins(matchWrap(), 0, 4, 0, 8));
+
         vectorView = new FlightVectorView(this);
         currentCard.addView(vectorView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(170)));
-        coordinateText = text("东/北/天：等待记录", 13, 0xFF5A6763, false);
+        coordinateText = text("东/北/天：等待姿态传感器", 13, 0xFF5A6763, false);
         coordinateText.setGravity(Gravity.CENTER);
         currentCard.addView(coordinateText, matchWrap());
         rowText = text("0 条数据", 13, 0xFF5A6763, false);
@@ -127,6 +179,16 @@ public final class MainActivity extends Activity {
         gnssSwitch = new Switch(this);
         gnssSwitch.setText("GNSS 辅助（速度、海拔与精度）");
         gnssSwitch.setTextSize(14);
+        gnssSwitch.setOnCheckedChangeListener((button, checked) -> {
+            if (checked && !RecordingService.isRunning()
+                    && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION,
+                        Manifest.permission.ACCESS_FINE_LOCATION}, REQUEST_PREVIEW_LOCATION);
+            } else if (!RecordingService.isRunning()) {
+                startPreviewLocation();
+            }
+        });
         currentCard.addView(gnssSwitch, matchWrap());
         reliableSwitch = new Switch(this);
         reliableSwitch.setText("息屏可靠模式（无唤醒传感器时会增加耗电）");
@@ -140,7 +202,7 @@ public final class MainActivity extends Activity {
         recordButton.setAllCaps(false);
         recordButton.setOnClickListener(v -> toggleRecording());
         currentCard.addView(recordButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
-        TextView note = text("文件保存至 Download/g。在约 ±0.06 g 容差内稳定 8 秒后降低写入频率；偶发扰动会保留，持续变化才切换高精度。", 12, 0xFF5A6763, false);
+        TextView note = text("首页打开时以低频实时预览，未记录时不会写入文件。文件保存至 Download/g；在约 ±0.06 g 容差内稳定 8 秒后降低写入频率。", 12, 0xFF5A6763, false);
         currentCard.addView(note, margins(matchWrap(), 0, 10, 0, 0));
 
         LinearLayout savedCard = card();
@@ -201,32 +263,44 @@ public final class MainActivity extends Activity {
                 Toast.makeText(this, "未获得定位权限，将仅记录传感器数据", Toast.LENGTH_LONG).show();
             }
             startRecordingNow();
+        } else if (requestCode == REQUEST_PREVIEW_LOCATION) {
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                    != PackageManager.PERMISSION_GRANTED) {
+                gnssSwitch.setChecked(false);
+                gpsText.setText("GPS：未授权定位权限");
+            } else {
+                startPreviewLocation();
+            }
         }
     }
 
     private void startRecordingNow() {
+        stopPreview();
         Intent start = new Intent(this, RecordingService.class).setAction(RecordingService.ACTION_START);
         start.putExtra(RecordingService.EXTRA_GNSS, gnssSwitch.isChecked());
         start.putExtra(RecordingService.EXTRA_RELIABLE, reliableSwitch.isChecked());
         startForegroundService(start);
-        renderRecording("NORMAL", Float.NaN, Float.NaN, Float.NaN, Float.NaN, Float.NaN, 0);
+        renderRecording("NORMAL", 0);
     }
 
     private void renderStopped() {
-        statusText.setText("未在记录");
+        statusText.setText("未在记录 · 实时预览");
         statusText.setTextColor(0xFF5A6763);
         totalGText.setText("—\n合加速度");
         verticalGText.setText("—\n天地轴 G");
-        coordinateText.setText("东/北/天：等待记录");
+        deviceAccelText.setText("设备轴加速度：等待传感器");
+        pressureText.setText("气压：等待传感器");
+        gpsText.setText("GPS：正在检查权限和卫星信号…");
+        coordinateText.setText("东/北/天：等待姿态传感器");
         vectorView.setVector(Float.NaN, Float.NaN, Float.NaN);
+        rowText.setText("实时预览（不写入文件）");
         recordButton.setText("开始记录");
         recordButton.setEnabled(true);
         gnssSwitch.setEnabled(true);
         reliableSwitch.setEnabled(true);
     }
 
-    private void renderRecording(String mode, float total, float vertical,
-                                 float east, float north, float up, int rows) {
+    private void renderRecording(String mode, int rows) {
         String label = switch (mode == null ? "NORMAL" : mode) {
             case "ACTIVE" -> "高精度记录中";
             case "STABLE" -> "低功耗记录中";
@@ -234,17 +308,177 @@ public final class MainActivity extends Activity {
         };
         statusText.setText("● " + label);
         statusText.setTextColor(0xFF0B6B5D);
-        totalGText.setText((Float.isFinite(total) ? String.format(Locale.getDefault(), "%.3f g", total) : "—") + "\n合加速度");
-        verticalGText.setText((Float.isFinite(vertical) ? String.format(Locale.getDefault(), "%.3f g", vertical) : "—") + "\n天地轴 G");
-        if (Float.isFinite(east)) {
-            coordinateText.setText(String.format(Locale.getDefault(), "东 %.2f  北 %.2f  天 %.2f m/s²", east, north, up));
-        }
-        vectorView.setVector(east, north, up);
         rowText.setText(String.format(Locale.getDefault(), "%,d 条数据", rows));
         recordButton.setText("停止并保存");
         recordButton.setEnabled(true);
         gnssSwitch.setEnabled(false);
         reliableSwitch.setEnabled(false);
+    }
+
+    private void renderAcceleration(float total, float vertical, float deviceX, float deviceY,
+                                    float deviceZ, float east, float north, float up) {
+        totalGText.setText((Float.isFinite(total)
+                ? String.format(Locale.getDefault(), "%.3f g", total) : "—") + "\n合加速度");
+        verticalGText.setText((Float.isFinite(vertical)
+                ? String.format(Locale.getDefault(), "%.3f g", vertical) : "—") + "\n天地轴 G");
+        if (Float.isFinite(deviceX) && Float.isFinite(deviceY) && Float.isFinite(deviceZ)) {
+            deviceAccelText.setText(String.format(Locale.getDefault(),
+                    "设备轴加速度：X %.3f  Y %.3f  Z %.3f m/s²", deviceX, deviceY, deviceZ));
+        } else {
+            deviceAccelText.setText("设备轴加速度：等待传感器");
+        }
+        if (Float.isFinite(east) && Float.isFinite(north) && Float.isFinite(up)) {
+            coordinateText.setText(String.format(Locale.getDefault(),
+                    "东 %.2f  北 %.2f  天 %.2f m/s²", east, north, up));
+        } else {
+            coordinateText.setText("东/北/天：设备无姿态数据");
+        }
+        vectorView.setVector(east, north, up);
+    }
+
+    private void renderPressure(float pressureHpa, float relativeAltitudeM) {
+        if (!Float.isFinite(pressureHpa)) {
+            pressureText.setText("气压：暂无数据（设备可能没有气压传感器）");
+            return;
+        }
+        String altitude = Float.isFinite(relativeAltitudeM)
+                ? String.format(Locale.getDefault(), " · 相对 %.1f m", relativeAltitudeM) : "";
+        pressureText.setText(String.format(Locale.getDefault(), "气压：%.2f hPa%s",
+                pressureHpa, altitude));
+    }
+
+    private void renderLocation(double latitude, double longitude, double altitudeM,
+                                float speedMps, float accuracyM) {
+        if (!Double.isFinite(latitude) || !Double.isFinite(longitude)) {
+            gpsText.setText("GPS：等待定位（未启用、未授权或暂无卫星信号）");
+            return;
+        }
+        String altitude = Double.isFinite(altitudeM)
+                ? String.format(Locale.getDefault(), " · 海拔 %.1f m", altitudeM) : "";
+        String speed = Float.isFinite(speedMps)
+                ? String.format(Locale.getDefault(), " · %.1f m/s", speedMps) : "";
+        String accuracy = Float.isFinite(accuracyM)
+                ? String.format(Locale.getDefault(), " · 精度 ±%.1f m", accuracyM) : "";
+        gpsText.setText(String.format(Locale.getDefault(), "GPS：%.6f, %.6f%s%s%s",
+                latitude, longitude, altitude, speed, accuracy));
+    }
+
+    private void startPreview() {
+        if (RecordingService.isRunning() || previewSensorManager == null) return;
+        previewAccelerometer = previewSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        previewRotationSensor = previewSensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        previewPressureSensor = previewSensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE);
+        if (previewAccelerometer != null) {
+            previewSensorManager.registerListener(this, previewAccelerometer,
+                    200_000, 1_000_000);
+        } else {
+            deviceAccelText.setText("设备轴加速度：设备没有加速度计");
+        }
+        if (previewRotationSensor != null) {
+            previewSensorManager.registerListener(this, previewRotationSensor,
+                    200_000, 1_000_000);
+        } else {
+            coordinateText.setText("东/北/天：设备没有姿态传感器");
+        }
+        if (previewPressureSensor != null) {
+            previewSensorManager.registerListener(this, previewPressureSensor,
+                    1_000_000, 3_000_000);
+        } else {
+            pressureText.setText("气压：设备没有气压传感器");
+        }
+        startPreviewLocation();
+    }
+
+    @SuppressLint("MissingPermission")
+    private void startPreviewLocation() {
+        if (RecordingService.isRunning() || previewLocationManager == null) return;
+        if (previewLocationActive) {
+            try { previewLocationManager.removeUpdates(this); }
+            catch (SecurityException ignored) { }
+            previewLocationActive = false;
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            gpsText.setText("GPS：未授权定位权限（打开 GNSS 辅助可授权）");
+            return;
+        }
+        try {
+            if (!previewLocationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                gpsText.setText("GPS：系统定位未开启");
+                return;
+            }
+            Location last = previewLocationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            if (last != null) onLocationChanged(last);
+            else gpsText.setText("GPS：正在搜索卫星…");
+            previewLocationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER,
+                    5_000L, 0f, this, Looper.getMainLooper());
+            previewLocationActive = true;
+        } catch (SecurityException | IllegalArgumentException e) {
+            gpsText.setText("GPS：无法启动定位");
+        }
+    }
+
+    private void stopPreview() {
+        if (previewSensorManager != null) previewSensorManager.unregisterListener(this);
+        if (previewLocationManager != null && previewLocationActive) {
+            try { previewLocationManager.removeUpdates(this); }
+            catch (SecurityException ignored) { }
+        }
+        previewLocationActive = false;
+        hasPreviewRotation = false;
+        previewBaselinePressure = Float.NaN;
+    }
+
+    @Override public void onSensorChanged(SensorEvent event) {
+        if (RecordingService.isRunning()) return;
+        switch (event.sensor.getType()) {
+            case Sensor.TYPE_ROTATION_VECTOR -> {
+                SensorManager.getRotationMatrixFromVector(previewRotationMatrix, event.values);
+                hasPreviewRotation = true;
+            }
+            case Sensor.TYPE_PRESSURE -> {
+                float pressure = event.values[0];
+                if (!Float.isFinite(previewBaselinePressure)) previewBaselinePressure = pressure;
+                renderPressure(pressure, SensorManager.getAltitude(previewBaselinePressure, pressure));
+            }
+            case Sensor.TYPE_ACCELEROMETER -> {
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastPreviewAccelerationUiMs < 250) return;
+                lastPreviewAccelerationUiMs = now;
+                float x = event.values[0];
+                float y = event.values[1];
+                float z = event.values[2];
+                float total = (float) (Math.sqrt(x * x + y * y + z * z)
+                        / SensorManager.GRAVITY_EARTH);
+                float[] world = hasPreviewRotation
+                        ? CoordinateMapper.deviceToWorld(previewRotationMatrix, x, y, z)
+                        : new float[]{Float.NaN, Float.NaN, Float.NaN};
+                float vertical = Float.isFinite(world[2])
+                        ? world[2] / SensorManager.GRAVITY_EARTH : Float.NaN;
+                renderAcceleration(total, vertical, x, y, z, world[0], world[1], world[2]);
+            }
+            default -> { }
+        }
+    }
+
+    @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
+
+    @Override public void onLocationChanged(Location location) {
+        if (RecordingService.isRunning()) return;
+        renderLocation(location.getLatitude(), location.getLongitude(),
+                location.hasAltitude() ? location.getAltitude() : Double.NaN,
+                location.hasSpeed() ? location.getSpeed() : Float.NaN,
+                location.hasAccuracy() ? location.getAccuracy() : Float.NaN);
+    }
+
+    @Override public void onProviderEnabled(String provider) {
+        if (LocationManager.GPS_PROVIDER.equals(provider)) startPreviewLocation();
+    }
+
+    @Override public void onStatusChanged(String provider, int status, Bundle extras) { }
+
+    @Override public void onProviderDisabled(String provider) {
+        if (LocationManager.GPS_PROVIDER.equals(provider)) gpsText.setText("GPS：系统定位未开启");
     }
 
     private void refreshFiles() {
