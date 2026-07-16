@@ -278,7 +278,7 @@ public final class MainActivity extends Activity {
             Uri uri = data.getData();
             try {
                 getContentResolver().takePersistableUriPermission(uri,
-                        data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION));
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION);
             } catch (SecurityException ignored) { }
             openDetail(uri, "所选记录");
         }
